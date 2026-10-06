@@ -87,6 +87,62 @@ function getErrorMessage(err: any, fallback: string): string {
   return fallback;
 }
 
+type AuthAction = 'signup' | 'signin' | 'verify' | 'resend';
+
+function getFriendlyAuthError(err: unknown, action: AuthAction): string {
+  const value = typeof err === 'object' && err !== null ? err as Record<string, unknown> : {};
+  const raw = getErrorMessage(err, '');
+  const message = raw.toLowerCase();
+  const code = String(value.code ?? '').toLowerCase();
+  const status = Number(value.status ?? 0);
+
+  if (message.includes('rate limit') || message.includes('too many') || status === 429) {
+    return 'Too many email requests. Please wait at least one minute before trying again.';
+  }
+  if (message.includes('error sending confirmation email') || message.includes('smtp') || code.includes('email_send')) {
+    return 'We could not send the verification email. Please try again shortly. If this continues, Omnave email delivery needs attention.';
+  }
+  if (message.includes('database error saving new user') || message.includes('database')) {
+    return 'Your account could not be created because the account database rejected the request. Please try again shortly.';
+  }
+  if (message.includes('signup') && message.includes('disabled')) {
+    return 'New account registration is temporarily disabled.';
+  }
+  if (message.includes('already registered') || message.includes('already in use') || message.includes('already exists')) {
+    return 'An account may already use this email. Try signing in or resetting its password.';
+  }
+  if (message.includes('invalid email') || code === 'email_address_invalid') {
+    return 'Enter a valid email address that can receive the verification code.';
+  }
+  if (message.includes('password') && (message.includes('weak') || message.includes('least'))) {
+    return 'Choose a stronger password that meets every requirement shown above.';
+  }
+  if (message.includes('email not confirmed') || code === 'email_not_confirmed') {
+    return 'Verify your email before signing in. Check your inbox or request another code.';
+  }
+  if (message.includes('invalid login credentials')) {
+    return 'Incorrect email or password. Please try again.';
+  }
+  if (message.includes('token') && (message.includes('expired') || message.includes('invalid'))) {
+    return 'That verification code is invalid or expired. Request a new code and try again.';
+  }
+  if (
+    message.includes('failed to fetch')
+    || message.includes('network request failed')
+    || message.includes('load failed')
+    || (value.name === 'AuthRetryableFetchError' && !status)
+  ) {
+    return 'Omnave could not reach the authentication service. Try again once; if it continues, disable any VPN or content blocker and contact support.';
+  }
+  if (status >= 500) {
+    return action === 'signup' || action === 'resend'
+      ? 'The account service could not send your verification email. Please try again shortly.'
+      : 'The account service is temporarily unavailable. Please try again shortly.';
+  }
+
+  return raw || 'The account request could not be completed. Please try again.';
+}
+
 export default function AuthModal({ isOpen, onClose, initialView = 'login' }: AuthModalProps) {
   const [authStep, setAuthStep] = useState<AuthStep>(initialView === 'login' ? 'signin' : 'signup');
   const [mounted, setMounted] = useState(false);
@@ -206,18 +262,6 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
 
     setIsLoading(true);
 
-    try {
-      await fetch(`${supabaseUrl}/auth/v1/health`, { 
-        method: 'GET',
-        headers: { 'apikey': supabaseKey }
-      });
-    } catch (nativeError: any) {
-      console.error("NATIVE FETCH FAILED:", nativeError);
-      setError(`Native Browser Error: ${nativeError.message || 'Failed to fetch'}. Check console for hidden blocks.`);
-      setIsLoading(false);
-      return;
-    }
-
     const supabase = createBrowserClient(supabaseUrl, supabaseKey);
 
     if (authStep === 'signup') {
@@ -260,24 +304,7 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
       } catch (err: any) {
         console.error("Supabase SignUp Error:", err);
         
-        // Sanitize empty object strings
-        let exactMessage = err?.message || err?.error_description || '';
-        if (exactMessage === '{}' || exactMessage === '[object Object]') {
-          exactMessage = '';
-        }
-        
-        const msgLower = exactMessage.toLowerCase();
-        
-        // Handle specific network/fetch failures
-        if (err?.name === 'AuthRetryableFetchError' || msgLower.includes('fetch') || !exactMessage) {
-          setError('Network error: Cannot connect to server. Please check your connection.');
-        } else if (msgLower.includes('already registered') || msgLower.includes('already in use') || msgLower.includes('exists')) {
-          setError('This email is already in use. Please Sign In instead.');
-        } else if (msgLower.includes('rate limit')) {
-          setError('Too many requests. Please wait a moment and try again.');
-        } else {
-          setError(exactMessage);
-        }
+        setError(getFriendlyAuthError(err, 'signup'));
       } finally {
         setIsLoading(false);
       }
@@ -309,19 +336,7 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
       } catch (err: any) {
         console.error("Supabase Verify Error:", err);
         
-        // Sanitize empty object strings
-        let exactMessage = err?.message || err?.error_description || '';
-        if (exactMessage === '{}' || exactMessage === '[object Object]') {
-          exactMessage = '';
-        }
-        
-        const msgLower = exactMessage.toLowerCase();
-
-        if (err?.name === 'AuthRetryableFetchError' || err instanceof TypeError || msgLower.includes('fetch') || !exactMessage) {
-          setError('Network error: Cannot connect to server. Please check your connection.');
-        } else {
-          setError(exactMessage);
-        }
+        setError(getFriendlyAuthError(err, 'verify'));
       } finally {
         setIsLoading(false);
       }
@@ -350,21 +365,7 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
       } catch (err: any) {
         console.error("Supabase SignIn Error:", err);
         
-        // Sanitize empty object strings
-        let exactMessage = err?.message || err?.error_description || '';
-        if (exactMessage === '{}' || exactMessage === '[object Object]') {
-          exactMessage = '';
-        }
-        
-        const msgLower = exactMessage.toLowerCase();
-
-        if (err?.name === 'AuthRetryableFetchError' || msgLower.includes('fetch') || !exactMessage) {
-          setError('Network error: Cannot connect to server. Please check your connection.');
-        } else if (msgLower.includes('invalid login credentials')) {
-          setError('Incorrect email or password. Please try again.');
-        } else {
-          setError(exactMessage);
-        }
+        setError(getFriendlyAuthError(err, 'signin'));
         setIsLoading(false);
       }
     }
@@ -392,7 +393,7 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
       toast('Verification code resent!', 'success');
       setResendCooldown(60);
     } catch (err: any) {
-      setError(getErrorMessage(err, 'Failed to resend code. Please try again.'));
+      setError(getFriendlyAuthError(err, 'resend'));
     } finally {
       setIsResending(false);
     }
