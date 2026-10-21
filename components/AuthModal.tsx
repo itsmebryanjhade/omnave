@@ -8,6 +8,7 @@ import Image from 'next/image';
 import { X, Eye, EyeOff } from 'lucide-react';
 import { createBrowserClient } from "@supabase/ssr";
 import { useToast } from '@/components/ToastProvider';
+import { EMAIL_OTP_LENGTH, isCompleteEmailOtp, normalizeEmailOtp } from '@/lib/auth/emailOtp';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -16,7 +17,6 @@ interface AuthModalProps {
 }
 
 type AuthStep = 'signup' | 'signin' | 'verify' | 'success';
-const EMAIL_OTP_LENGTH = 6;
 
 // Helper to safely parse and format Supabase/gotrue auth errors
 function getErrorMessage(err: any, fallback: string): string {
@@ -160,6 +160,7 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
   const [resendCooldown, setResendCooldown] = useState(0);
 
   const otpRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const verificationInFlightRef = useRef(false);
 
   // Real-time password criteria
   const hasMinLength = password.length >= 8;
@@ -178,6 +179,7 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
     setOtpToken('');
     setError(null);
     setShowPassword(false);
+    verificationInFlightRef.current = false;
   }, [initialView, isOpen]);
 
   // Keyboard accessibility (Escape to close)
@@ -208,13 +210,6 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
     return () => clearTimeout(timer);
   }, [resendCooldown]);
 
-  // Auto-submit when the complete Supabase email OTP has been entered.
-  useEffect(() => {
-    if (authStep === 'verify' && otpToken.length === EMAIL_OTP_LENGTH && !isLoading) {
-      handleAuthSubmit({ preventDefault: () => {} } as React.FormEvent);
-    }
-  }, [otpToken, authStep, isLoading]);
-
   const handleOtpChange = (index: number, value: string) => {
     if (!/^\d*$/.test(value)) return;
     const newToken = otpToken.split('');
@@ -232,7 +227,7 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
 
   const handleOtpPaste = (e: React.ClipboardEvent) => {
     e.preventDefault();
-    const pastedData = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, EMAIL_OTP_LENGTH);
+    const pastedData = normalizeEmailOtp(e.clipboardData.getData('text'));
     if (pastedData) {
       setOtpToken(pastedData);
       const focusIndex = Math.min(pastedData.length, EMAIL_OTP_LENGTH - 1);
@@ -242,6 +237,9 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
 
   const handleAuthSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+
+    if (authStep === 'verify' && verificationInFlightRef.current) return;
+
     setError(null);
 
     const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
@@ -309,11 +307,14 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
         setIsLoading(false);
       }
     } else if (authStep === 'verify') {
-      if (!otpToken || otpToken.length < EMAIL_OTP_LENGTH) {
+      if (!isCompleteEmailOtp(otpToken)) {
         setError(`Please enter the ${EMAIL_OTP_LENGTH}-digit verification code.`);
         setIsLoading(false);
         return;
       }
+
+      verificationInFlightRef.current = true;
+
       try {
         const { data, error: verifyError } = await supabase.auth.verifyOtp({
           email,
@@ -338,6 +339,7 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
         
         setError(getFriendlyAuthError(err, 'verify'));
       } finally {
+        verificationInFlightRef.current = false;
         setIsLoading(false);
       }
     } else if (authStep === 'signin') {
@@ -411,7 +413,7 @@ export default function AuthModal({ isOpen, onClose, initialView = 'login' }: Au
       !isPasswordValid || !email || !fullName
     )
   ) || (
-    authStep === 'verify' && otpToken.length < EMAIL_OTP_LENGTH
+    authStep === 'verify' && !isCompleteEmailOtp(otpToken)
   );
 
   const modalContent = (
